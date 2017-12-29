@@ -6,12 +6,17 @@
 const Alexa = require('alexa-sdk');
 const request = require('request');
 const _ = require('lodash');
+const moment = require('moment');
 
 const APP_ID = process.env['ASK_APPID'];
+const AUTH_TOKEN_OVERRIDE = process.env['AUTH_TOKEN_OVERRIDE'];
 const TCUBE_API_URL = 'https://tcube.technossus.com/api/';
 
 function makeTCubeApiUrl(url) {
-    return `${TCUBE_API_URL}${url}`;
+    const result = `${TCUBE_API_URL}${url}`;
+    console.log(`Preparing to call '${result}'`);
+
+    return result;
 }
 
 function getTimeEntryOnDate(date) {
@@ -25,24 +30,39 @@ function getTimeEntryOnDate(date) {
     });
 }
 
-function getTimeEntriesForThisWeek() {
-    return new Promise(function (res, rej) {
+function getTimeEntriesForThisWeek(authToken) {
+    return new Promise((res, rej) => {
+        const requestOptions = {
+            headers: {
+                'Authorization': `Bearer ${authToken}`
+            }
+        };
+
         // Get the current week's time sheet
-        request.get(makeTCubeApiUrl('TimeSheet/1'), null, function (err, response, body) {
-            const latestTimeSheet = body.Grid[0];
+        request.get(makeTCubeApiUrl('TimeSheet/1'), requestOptions, (err, response, body) => {
+            if (err) {
+                console.log('error getting most recent time sheet', JSON.stringify(err));
+                return rej(err);
+            }
+
+            const payload = JSON.parse(body);
+            const latestTimeSheet = payload.Grid[0];
 
             // Get the entries in the time sheet and map them so they're easily iterable
-            request.get(makeTCubeApiUrl(`TimeEntryModel/${latestTimeSheet.TimeSheetId}`), null, function (err, response, body) {
-                const entries = _(body.Projects)
-                    .map(function (project) {
-                        const
+            request.get(makeTCubeApiUrl(`TimeEntryModel/${latestTimeSheet.TimeSheetID}`), requestOptions, (err, response, body) => {
+                if (err) {
+                    console.log('error getting this weeks timesheet: ', JSON.stringify(err));
+                    return rej(err);
+                }
+
+                const payload = JSON.parse(body);
+                const entries = _(payload.Projects)
+                    .flatMap(project => {
                         return _(project.TimeEntries)
-                            .filter(function (entry) {
-                                return !entry.InvalidEntry;
-                            })
-                            .map(function (entry) {
+                            .filter(entry => !entry.InvalidEntry)
+                            .map(entry => {
                                 return {
-                                    project: project.ProjectName,
+                                    project: `${project.CompanyName} - ${project.ProjectName}`,
                                     date: entry.Date,
                                     subject: entry.Subject,
                                     hours: entry.Hours
@@ -50,6 +70,7 @@ function getTimeEntriesForThisWeek() {
                             })
                             .value();
                     })
+                    .orderBy(entry => entry.date, "asc")
                     .value();
 
                 res(entries);
@@ -58,12 +79,24 @@ function getTimeEntriesForThisWeek() {
     });
 }
 
-function describeEntry(entry) {
-    return `Looks like you worked ${entry.hours} hours on ${entry.date} for ${entry.project} and your entry's subject was "${entry.subject}"`;
+function formatDate(date) {
+    return moment(date).format('dddd, MMMM Do YYYY')
+}
+
+function describeEntry(entry, ignoreDate) {
+    return `${ignoreDate ? 'You' : `On ${formatDate(entry.date)} you`} worked ${entry.hours} hours for ${entry.project}. Your subject was "${entry.subject}"`;
+}
+
+function describeEntryWithoutDate(entry) {
+    return describeEntry(entry, true);
 }
 
 function getIntent(alexa) {
     return alexa.event.request.intent;
+}
+
+function getAuthToken(alexa) {
+    return AUTH_TOKEN_OVERRIDE || (alexa.event.session && alexa.event.session.user && alexa.event.session.user.accessToken);
 }
 
 const handlers = {
@@ -77,16 +110,10 @@ const handlers = {
             });
     },
     'GetThisWeek': function () {
-        this.response.shouldEndSession(false);
-
-        this.emit(':tell', `Alright -- let's find your time entries...`);
-
-        return getTimeEntriesForThisWeek()
+        return getTimeEntriesForThisWeek(getAuthToken(this))
             .then(entries => {
                 if (!entries || !entries.length) {
-                    this.emit(':tell', `Looks like you haven't entered any entries for this week!`);
-
-                    return this.response.shouldEndSession(true);
+                    return this.emit(':tell', `Looks like you haven't entered any entries for this week!`);
                 }
 
                 // Group all entries by date so we can list them
@@ -95,19 +122,25 @@ const handlers = {
                 });
 
                 // Loop through our entries and describe them
-                _.forIn(entries, function (entriesForDate, date) {
-                    this.emit(':tell', `Here are your entries for ${date}:`);
+                let speech = `Alright, I've got your entries for this week! `;
+                _.forIn(entriesByDate, (entriesForDate, date) => {
+                    const speechForDay = _.reduce(entriesForDate, (acc, entry) => {
+                        return `${acc}\n${describeEntryWithoutDate(entry)}.`;
+                    }, `Here's what you did on ${formatDate(date)}: `);
 
-                    _.forEach(entriesForDate, function (entry) {
-                        this.emit(':tell', describeEntry(entry));
-                    });
+                    speech += `\n${speechForDay}`;
                 });
 
-                this.response.shouldEndSession(true);
+                this.emit(':tell', speech);
+            })
+            .catch(err => {
+                console.log('Error: ', JSON.stringify(err));
+
+                this.emit(':tell', `Something went wrong talking to t cube!`);
             });
     },
     'LaunchRequest': function () {
-        const authToken = this.event.session.user.accessToken;
+        const authToken = getAuthToken(this);
         if (authToken == undefined) {
             return this.emit(':tellWithLinkAccountCard', `We're going to need to link your Technossus account first!`);
         }
