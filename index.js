@@ -84,7 +84,7 @@ function formatDate(date) {
 }
 
 function describeEntry(entry, ignoreDate) {
-    return `${ignoreDate ? 'You' : `On ${formatDate(entry.date)} you`} worked ${entry.hours} hours for ${entry.project}. Your subject was "${entry.subject}"`;
+    return `${ignoreDate ? 'You' : `On ${formatDate(entry.date)} you`} worked ${entry.hours} hours for ${entry.project}. Your entry's subject was "${entry.subject}"`;
 }
 
 function describeEntryWithoutDate(entry) {
@@ -110,28 +110,41 @@ const handlers = {
             });
     },
     'GetThisWeek': function () {
-        return getTimeEntriesForThisWeek(getAuthToken(this))
+        const authToken = getAuthToken(this);
+        if(authToken == undefined) {
+            return this.emit('NoAuthToken');
+        }
+
+        // Get the time entries for the current week
+        return getTimeEntriesForThisWeek(authToken)
             .then(entries => {
                 if (!entries || !entries.length) {
                     return this.emit(':tell', `Looks like you haven't entered any entries for this week!`);
                 }
 
                 // Group all entries by date so we can list them
-                const entriesByDate = _.groupBy(entries, function (entry) {
-                    return entry.date;
-                });
+                const entriesByDate = _.groupBy(entries, entry => entry.date);
+
+                let speech = `Alright, I've got your entries for this week! `;
+                const card = {
+                    title: 'Your work week',
+                    content: ``
+                };
 
                 // Loop through our entries and describe them
-                let speech = `Alright, I've got your entries for this week! `;
                 _.forIn(entriesByDate, (entriesForDate, date) => {
+                    const formattedDate = formatDate(date);
+
+                    // Speech for all the time entries for the current day we're looking at 
                     const speechForDay = _.reduce(entriesForDate, (acc, entry) => {
                         return `${acc}\n${describeEntryWithoutDate(entry)}.`;
-                    }, `Here's what you did on ${formatDate(date)}: `);
+                    });
 
-                    speech += `\n${speechForDay}`;
+                    speech += `\nHere's what you did on ${formattedDate}: ${speechForDay}`;
+                    card.content += `\n\n${formattedDate}: ${_.sumBy(entriesForDate, entry => entry.hours)} hours`
                 });
 
-                this.emit(':tell', speech);
+                this.emit(':tellWithCard', speech, card.title, card.content);
             })
             .catch(err => {
                 console.log('Error: ', JSON.stringify(err));
@@ -142,12 +155,15 @@ const handlers = {
     'LaunchRequest': function () {
         const authToken = getAuthToken(this);
         if (authToken == undefined) {
-            return this.emit(':tellWithLinkAccountCard', `We're going to need to link your Technossus account first!`);
+            return this.emit('NoAuthToken');
         }
 
         console.log('user: ', JSON.stringify(this.event.session.user));
 
         this.emit(':ask', `Welcome to T Cube! You're all logged in.`);
+    },
+    'NoAuthToken': function () {
+        this.emit(':tellWithLinkAccountCard', `We're going to need to link your tech-know-suss account first!`);
     },
     'AMAZON.HelpIntent': function () {
         this.emit(':ask', this.attributes.speechOutput, this.attributes.repromptSpeech);
