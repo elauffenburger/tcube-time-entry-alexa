@@ -1,0 +1,30 @@
+{
+    "interactionModel": {
+        "languageModel": {
+            "invocationName": "hello world",
+            "types": [],
+            "intents": [
+                {
+                    "name": "GetThisWeek",
+                    "slots": [],
+                    "samples": [
+                        "what did i do this week"
+                    ]
+                },
+                {
+                    "name": "GetTimeEntryOnDate",
+                    "slots": [
+                        {
+                            "name": "Date",
+                            "type": "AMAZON.DATE"
+                        }
+                    ],
+                    "samples": [
+                        "what was my time on {Date}",
+                        "what was my time entry on {Date}"
+                    ]
+                }
+            ]
+        }
+    }
+}
