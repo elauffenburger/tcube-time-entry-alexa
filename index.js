@@ -10,7 +10,7 @@ const moment = require('moment');
 
 const APP_ID = process.env['ASK_APPID'];
 const AUTH_TOKEN_OVERRIDE = process.env['AUTH_TOKEN_OVERRIDE'];
-const TCUBE_API_URL = 'https://tcube.technossus.com/api/';
+const TCUBE_API_URL = process.env['TCUBE_API_URL'] || 'https://tcube.technossus.com/api/';
 
 function makeTCubeApiUrl(url) {
     const result = `${TCUBE_API_URL}${url}`;
@@ -138,7 +138,7 @@ const handlers = {
                     // Speech for all the time entries for the current day we're looking at 
                     const speechForDay = _.reduce(entriesForDate, (acc, entry) => {
                         return `${acc}\n${describeEntryWithoutDate(entry)}.`;
-                    });
+                    }, '');
 
                     speech += `\nHere's what you did on ${formattedDate}: ${speechForDay}`;
                     card.content += `\n\n${formattedDate}: ${_.sumBy(entriesForDate, entry => entry.hours)} hours`

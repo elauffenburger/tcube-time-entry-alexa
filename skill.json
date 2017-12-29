@@ -3,14 +3,13 @@
     "publishingInformation": {
       "locales": {
         "en-US": {
-          "summary": "Sample Short Description",
+          "summary": "Provides access to TCube",
           "examplePhrases": [
-            "Alexa tell me what my time entry on Monday was",
-            "Alexa tell me what my time entry on last Monday was",
-            "Alexa tell me what my time entry on Monday, the 25th was"
+            "Alexa tell me what my time entry on Monday, the 25th was",
+            "Alexa tell me what I did this week"
           ],
-          "name": "tcube-time-entry",
-          "description": "Sample Full Description"
+          "name": "TCube Time Entry",
+          "description": "Provides access to TCube"
         }
       },
       "isAvailableWorldwide": true,
