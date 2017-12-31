@@ -4,6 +4,7 @@
 'use strict';
 
 const Alexa = require('alexa-sdk');
+const AmazonDateParser = require('amazon-date-parser')
 const request = require('request');
 const _ = require('lodash');
 const moment = require('moment');
@@ -31,56 +32,99 @@ function getTimeEntryOnDate(date) {
 }
 
 function getTimeEntriesForThisWeek(authToken) {
+    console.log('preparing to get entries for this week');
+
+    return getTimeEntriesForWeekOf(authToken, moment().toDate());
+}
+
+function getTimeEntriesForWeekOf(authToken, date) {
     return new Promise((res, rej) => {
-        const requestOptions = {
-            headers: {
-                'Authorization': `Bearer ${authToken}`
-            }
-        };
+        try {
+            const requestOptions = {
+                headers: {
+                    'Authorization': `Bearer ${authToken}`
+                }
+            };
 
-        // Get the current week's time sheet
-        request.get(makeTCubeApiUrl('TimeSheet/1'), requestOptions, (err, response, body) => {
-            if (err) {
-                console.log('error getting most recent time sheet', JSON.stringify(err));
-                return rej(err);
-            }
+            console.log(`attempting to get weeks to fetch for week of ${date}`);
 
-            const payload = JSON.parse(body);
-            const latestTimeSheet = payload.Grid[0];
+            const weeksToFetch = moment().subtract(date).weeks();
 
-            // Get the entries in the time sheet and map them so they're easily iterable
-            request.get(makeTCubeApiUrl(`TimeEntryModel/${latestTimeSheet.TimeSheetID}`), requestOptions, (err, response, body) => {
+            console.log(`calculated we need ${weeksToFetch} weeks back for ${date}`);
+
+            // Get the current week's time sheet
+            request.get(makeTCubeApiUrl(`TimeSheet/${weeksToFetch}`), requestOptions, (err, response, body) => {
                 if (err) {
-                    console.log('error getting this weeks timesheet: ', JSON.stringify(err));
+                    console.log(`error getting time sheet for ${date}`, JSON.stringify(err));
                     return rej(err);
                 }
 
                 const payload = JSON.parse(body);
-                const entries = _(payload.Projects)
-                    .flatMap(project => {
-                        return _(project.TimeEntries)
-                            .filter(entry => !entry.InvalidEntry)
-                            .map(entry => {
-                                return {
-                                    project: `${project.CompanyName} - ${project.ProjectName}`,
-                                    date: entry.Date,
-                                    subject: entry.Subject,
-                                    hours: entry.Hours
-                                };
-                            })
-                            .value();
-                    })
-                    .orderBy(entry => entry.date, "asc")
-                    .value();
+                const timeSheet = _.last(payload.Grid);
 
-                res(entries);
+                // Get the entries in the time sheet and map them so they're easily iterable
+                request.get(makeTCubeApiUrl(`TimeEntryModel/${timeSheet.TimeSheetID}`), requestOptions, (err, response, body) => {
+                    if (err) {
+                        console.log('error getting this weeks timesheet: ', JSON.stringify(err));
+                        return rej(err);
+                    }
+
+                    const payload = JSON.parse(body);
+                    const entries = _(payload.Projects)
+                        .flatMap(project => {
+                            return _(project.TimeEntries)
+                                .filter(entry => !entry.InvalidEntry)
+                                .map(entry => {
+                                    return {
+                                        project: `${project.CompanyName} - ${project.ProjectName}`,
+                                        date: moment(entry.Date),
+                                        subject: entry.Subject,
+                                        hours: entry.Hours
+                                    };
+                                })
+                                .value();
+                        })
+                        .orderBy(entry => entry.date, "asc")
+                        .value();
+
+                    res(entries);
+                });
+
             });
+        } catch (e) {
+            rej(e);
+        }
+    });
+}
+
+function processEntriesForWeek(entries, onSpeechGeneratedForDay) {
+    // Group all entries by date so we can list them
+    const entriesByDate = _.groupBy(entries, entry => entry.date);
+
+    // Loop through our entries and describe them
+    _.forIn(entriesByDate, (entriesForDate, date) => {
+        const formattedDate = formatDate(date);
+        const totalHoursWorked = _.sumBy(entriesForDate, entry => entry.hours);
+
+        // Speech for all the time entries for the current day we're looking at 
+        const speechForDay = _.reduce(entriesForDate, (acc, entry) => {
+            return `${acc}\n${describeEntryWithoutDate(entry)}.`;
+        }, '');
+
+        onSpeechGeneratedForDay({
+            date,
+            formattedDate,
+            speechForDay,
+            entriesForDate,
+            totalHoursWorked,
+            recommendedSpeech: `\nHere's what you did on ${formattedDate}: ${speechForDay}`,
+            recommendedCardContent: `\n\n${formattedDate}: ${totalHoursWorked} hours`
         });
     });
 }
 
 function formatDate(date) {
-    return moment(date).format('dddd, MMMM Do YYYY')
+    return date.format('dddd, MMMM Do YYYY')
 }
 
 function describeEntry(entry, ignoreDate) {
@@ -101,17 +145,72 @@ function getAuthToken(alexa) {
 
 const handlers = {
     'GetTimeEntryOnDate': function () {
-        const intent = this.event.request.intent;
-        const date = intent.slots.Date.value;
+        const authToken = getAuthToken(this);
+        if (authToken == undefined) {
+            return this.emit('NoAuthToken');
+        }
 
-        return getTimeEntryOnDate(date)
-            .then(entry => {
-                this.emit(':tell', describeEntry(entry));
+        const dateToFetch = moment(this.event.request.intent.slots.Date.value);
+        const formattedDateToFetch = formatDate(dateToFetch);
+
+        return getTimeEntriesForWeekOf(authToken, dateToFetch)
+            .then(entries => {
+                const entry = _.find(entries || [], entry => {
+                    console.log(`Comparing ${entry.date} to ${dateToFetch}`);
+                    return dateToFetch.diff(entry.date) == 0;
+                });
+
+                if (!entry) {
+                    return this.emit(':tell', `Looks like you don't have any entries for that day!`);
+                }
+
+                let speech = describeEntry(entry);
+
+                this.emit(':tell', speech);
+            })
+            .catch(err => {
+                console.log('Error: ', JSON.stringify(err));
+
+                this.emit(':tell', `Something went wrong talking to t cube!`);
+            });
+    },
+    'GetWeek': function () {
+        const authToken = getAuthToken(this);
+        if (authToken == undefined) {
+            return this.emit('NoAuthToken');
+        }
+
+        const dateToFetch = moment(this.event.request.intent.slots.Date.value);
+        const formattedDateToFetch = formatDate(dateToFetch);
+
+        return getTimeEntriesForWeekOf(authToken, dateToFetch)
+            .then(entries => {
+                if (!entries || !entries.length) {
+                    return this.emit(':tell', `Looks like you haven't entered any entries for this week!`);
+                }
+
+                let speech = `Alright, I've got your entries for the week of ${formattedDateToFetch}!`;
+                const card = {
+                    title: `Your work on the week of ${formattedDateToFetch}`,
+                    content: ''
+                };
+
+                processEntriesForWeek(entries, dateInfo => {
+                    speech += dateInfo.recommendedSpeech;
+                    card.content += dateInfo.recommendedCardContent
+                });
+
+                this.emit(':tellWithCard', speech, card.title, card.content);
+            })
+            .catch(err => {
+                console.log('Error: ', JSON.stringify(err));
+
+                this.emit(':tell', `Something went wrong talking to t cube!`);
             });
     },
     'GetThisWeek': function () {
         const authToken = getAuthToken(this);
-        if(authToken == undefined) {
+        if (authToken == undefined) {
             return this.emit('NoAuthToken');
         }
 
@@ -122,26 +221,15 @@ const handlers = {
                     return this.emit(':tell', `Looks like you haven't entered any entries for this week!`);
                 }
 
-                // Group all entries by date so we can list them
-                const entriesByDate = _.groupBy(entries, entry => entry.date);
-
                 let speech = `Alright, I've got your entries for this week! `;
                 const card = {
                     title: 'Your work week',
-                    content: ``
+                    content: ''
                 };
 
-                // Loop through our entries and describe them
-                _.forIn(entriesByDate, (entriesForDate, date) => {
-                    const formattedDate = formatDate(date);
-
-                    // Speech for all the time entries for the current day we're looking at 
-                    const speechForDay = _.reduce(entriesForDate, (acc, entry) => {
-                        return `${acc}\n${describeEntryWithoutDate(entry)}.`;
-                    }, '');
-
-                    speech += `\nHere's what you did on ${formattedDate}: ${speechForDay}`;
-                    card.content += `\n\n${formattedDate}: ${_.sumBy(entriesForDate, entry => entry.hours)} hours`
+                processEntriesForWeek(entries, dateInfo => {
+                    speech += dateInfo.recommendedSpeech;
+                    card.content += dateInfo.recommendedCardContent
                 });
 
                 this.emit(':tellWithCard', speech, card.title, card.content);

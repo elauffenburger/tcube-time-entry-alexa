@@ -41,6 +41,18 @@
                     "name": "AMAZON.PreviousIntent"
                 },
                 {
+                    "name": "GetWeek",
+                    "slots": [
+                        {
+                            "name": "Date",
+                            "type": "AMAZON.DATE"
+                        }
+                    ],
+                    "samples": [
+                        "what did i do on the week of {Date}"
+                    ]
+                },
+                {
                     "name": "GetThisWeek",
                     "slots": [],
                     "samples": [
