@@ -41,6 +41,31 @@
                     "name": "AMAZON.PreviousIntent"
                 },
                 {
+                    "name": "CreateTimeEntry",
+                    "slots": [
+                        {
+                            "name": "Project",
+                            "type": "AMAZON.LITERAL"
+                        },
+                        {
+                            "name": "Date",
+                            "type": "AMAZON.DATE"
+                        },
+                        {
+                            "name": "Hours",
+                            "type": "AMAZON.NUMBER"
+                        },
+                        {
+                            "name": "Subject",
+                            "type": "AMAZON.LITERAL"
+                        }
+                    ],
+                    "samples": [
+                        "create time entry",
+                        "add a time entry"
+                    ]
+                },
+                {
                     "name": "GetWeek",
                     "slots": [
                         {
@@ -68,8 +93,7 @@
                         }
                     ],
                     "samples": [
-                        "what was my time on {Date}",
-                        "what was my time entry on {Date}"
+                        "what did i do on {Date}"
                     ]
                 }
             ]

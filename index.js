@@ -4,124 +4,13 @@
 'use strict';
 
 const Alexa = require('alexa-sdk');
-const AmazonDateParser = require('amazon-date-parser')
-const request = require('request');
 const _ = require('lodash');
 const moment = require('moment');
 
+const tcube = require('./tcube-api');
+
 const APP_ID = process.env['ASK_APPID'];
 const AUTH_TOKEN_OVERRIDE = process.env['AUTH_TOKEN_OVERRIDE'];
-const TCUBE_API_URL = process.env['TCUBE_API_URL'] || 'https://tcube.technossus.com/api/';
-
-function makeTCubeApiUrl(url) {
-    const result = `${TCUBE_API_URL}${url}`;
-    console.log(`Preparing to call '${result}'`);
-
-    return result;
-}
-
-function getTimeEntryOnDate(date) {
-    return new Promise(res => {
-        res({
-            project: 'a test project',
-            date: date,
-            subject: "a test entry!",
-            hours: 8
-        });
-    });
-}
-
-function getTimeEntriesForThisWeek(authToken) {
-    console.log('preparing to get entries for this week');
-
-    return getTimeEntriesForWeekOf(authToken, moment().toDate());
-}
-
-function getTimeEntriesForWeekOf(authToken, date) {
-    return new Promise((res, rej) => {
-        try {
-            const requestOptions = {
-                headers: {
-                    'Authorization': `Bearer ${authToken}`
-                }
-            };
-
-            console.log(`attempting to get weeks to fetch for week of ${date}`);
-
-            const weeksToFetch = moment().subtract(date).weeks();
-
-            console.log(`calculated we need ${weeksToFetch} weeks back for ${date}`);
-
-            // Get the current week's time sheet
-            request.get(makeTCubeApiUrl(`TimeSheet/${weeksToFetch}`), requestOptions, (err, response, body) => {
-                if (err) {
-                    console.log(`error getting time sheet for ${date}`, JSON.stringify(err));
-                    return rej(err);
-                }
-
-                const payload = JSON.parse(body);
-                const timeSheet = _.last(payload.Grid);
-
-                // Get the entries in the time sheet and map them so they're easily iterable
-                request.get(makeTCubeApiUrl(`TimeEntryModel/${timeSheet.TimeSheetID}`), requestOptions, (err, response, body) => {
-                    if (err) {
-                        console.log('error getting this weeks timesheet: ', JSON.stringify(err));
-                        return rej(err);
-                    }
-
-                    const payload = JSON.parse(body);
-                    const entries = _(payload.Projects)
-                        .flatMap(project => {
-                            return _(project.TimeEntries)
-                                .filter(entry => !entry.InvalidEntry)
-                                .map(entry => {
-                                    return {
-                                        project: `${project.CompanyName} - ${project.ProjectName}`,
-                                        date: moment(entry.Date),
-                                        subject: entry.Subject,
-                                        hours: entry.Hours
-                                    };
-                                })
-                                .value();
-                        })
-                        .orderBy(entry => entry.date, "asc")
-                        .value();
-
-                    res(entries);
-                });
-
-            });
-        } catch (e) {
-            rej(e);
-        }
-    });
-}
-
-function processEntriesForWeek(entries, onSpeechGeneratedForDay) {
-    // Group all entries by date so we can list them
-    const entriesByDate = _.groupBy(entries, entry => entry.date);
-
-    // Loop through our entries and describe them
-    _.forIn(entriesByDate, (entriesForDate, date) => {
-        const formattedDate = formatDate(date);
-        const totalHoursWorked = _.sumBy(entriesForDate, entry => entry.hours);
-
-        // Speech for all the time entries for the current day we're looking at 
-        const speechForDay = _.reduce(entriesForDate, (acc, entry) => {
-            return `${acc}\n${describeEntryWithoutDate(entry)}.`;
-        }, '');
-
-        onSpeechGeneratedForDay({
-            date,
-            formattedDate,
-            speechForDay,
-            entriesForDate,
-            totalHoursWorked,
-            recommendedSpeech: `\nHere's what you did on ${formattedDate}: ${speechForDay}`,
-            recommendedCardContent: `\n\n${formattedDate}: ${totalHoursWorked} hours`
-        });
-    });
-}
 
 function formatDate(date) {
     return date.format('dddd, MMMM Do YYYY')
@@ -143,7 +32,74 @@ function getAuthToken(alexa) {
     return AUTH_TOKEN_OVERRIDE || (alexa.event.session && alexa.event.session.user && alexa.event.session.user.accessToken);
 }
 
+function handleTCubeError(err) {
+    console.log(`Error: ${err}`);
+
+    this.emit(':tell', 'Something went wrong talking to T Cube!');
+}
+
+function processEntriesForWeek(entries, onSpeechGeneratedForDay) {
+    // Group all entries by date so we can list them
+    const entriesByDate = _.groupBy(entries, entry => entry.date);
+
+    // Loop through our entries and describe them
+    _.forIn(entriesByDate, (entriesForDate, date) => {
+        const formattedDate = formatDate(moment(date));
+        const totalHoursWorked = _.sumBy(entriesForDate, entry => entry.hours);
+
+        // Speech for all the time entries for the current day we're looking at 
+        const speechForDay = _.reduce(entriesForDate, (acc, entry) => {
+            return `${acc}\n${describeEntryWithoutDate(entry)}.`;
+        }, '');
+
+        onSpeechGeneratedForDay({
+            date,
+            formattedDate,
+            speechForDay,
+            entriesForDate,
+            totalHoursWorked,
+            recommendedSpeech: `\nHere's what you did on ${formattedDate}: ${speechForDay}`,
+            recommendedCardContent: `\n\n${formattedDate}: ${totalHoursWorked} hours`
+        });
+    });
+}
+
 const handlers = {
+    'AddEntryOnDate': function () {
+        const authToken = getAuthToken(this);
+        if (authToken == undefined) {
+            return this.emit('NoAuthToken');
+        }
+
+        const date = moment(this.event.request.intent.slots.Date.value);
+        const formattedDateToFetch = formatDate(date);
+
+        const hours = this.event.request.intent.slots.Hours.value;
+        const subject = this.event.request.intent.slots.Subject.value;
+
+        // TODO: figure out how to make this dynamic
+        //const projectName = this.event.request.intent.slots.Project.value;
+        const projectName = "Dedicated Team - 12 months";
+
+        return tcube.getTimeSheetForWeekOf(authToken, date)
+            .then(sheet => {
+                const project = _.find(sheet.Projects, project => project.ProjectName == projectName);
+
+                const entry = {
+                    Subject: subject,
+                    Description: subject,
+                    Hours: hours,
+                    Date: date
+                };
+
+                return tcube.createTimeEntryForProject(authToken, projectId, timeSheetId, entry)
+                    .then(createdEntry => {
+                        console.log(`Created entry: ${JSON.stringify(createdEntry)}`);
+
+                        this.emit(':tell', "Done...I think?");
+                    });
+            });
+    },
     'GetTimeEntryOnDate': function () {
         const authToken = getAuthToken(this);
         if (authToken == undefined) {
@@ -153,26 +109,30 @@ const handlers = {
         const dateToFetch = moment(this.event.request.intent.slots.Date.value);
         const formattedDateToFetch = formatDate(dateToFetch);
 
-        return getTimeEntriesForWeekOf(authToken, dateToFetch)
+        return tcube.getTimeEntriesForWeekOf(authToken, dateToFetch)
             .then(entries => {
-                const entry = _.find(entries || [], entry => {
+                entries = entries || [];
+
+                console.log(`received ${entries.length} entries for ${formattedDateToFetch}`);
+
+                const entry = _.find(entries, entry => {
                     console.log(`Comparing ${entry.date} to ${dateToFetch}`);
                     return dateToFetch.diff(entry.date) == 0;
                 });
 
                 if (!entry) {
+                    console.log(`failed to find an entry for ${formattedDateToFetch}`);
+
                     return this.emit(':tell', `Looks like you don't have any entries for that day!`);
                 }
+
+                console.log(`found an entry for ${formattedDateToFetch}`);
 
                 let speech = describeEntry(entry);
 
                 this.emit(':tell', speech);
             })
-            .catch(err => {
-                console.log('Error: ', JSON.stringify(err));
-
-                this.emit(':tell', `Something went wrong talking to t cube!`);
-            });
+            .catch(handleTCubeError.bind(this));
     },
     'GetWeek': function () {
         const authToken = getAuthToken(this);
@@ -183,10 +143,10 @@ const handlers = {
         const dateToFetch = moment(this.event.request.intent.slots.Date.value);
         const formattedDateToFetch = formatDate(dateToFetch);
 
-        return getTimeEntriesForWeekOf(authToken, dateToFetch)
+        return tcube.getTimeEntriesForWeekOf(authToken, dateToFetch)
             .then(entries => {
                 if (!entries || !entries.length) {
-                    return this.emit(':tell', `Looks like you haven't entered any entries for this week!`);
+                    return this.emit(':tell', `Looks like you haven't entered any entries for the week of ${formattedDateToFetch}`);
                 }
 
                 let speech = `Alright, I've got your entries for the week of ${formattedDateToFetch}!`;
@@ -202,11 +162,7 @@ const handlers = {
 
                 this.emit(':tellWithCard', speech, card.title, card.content);
             })
-            .catch(err => {
-                console.log('Error: ', JSON.stringify(err));
-
-                this.emit(':tell', `Something went wrong talking to t cube!`);
-            });
+            .catch(handleTCubeError.bind(this));
     },
     'GetThisWeek': function () {
         const authToken = getAuthToken(this);
@@ -215,7 +171,7 @@ const handlers = {
         }
 
         // Get the time entries for the current week
-        return getTimeEntriesForThisWeek(authToken)
+        return tcube.getTimeEntriesForThisWeek(authToken)
             .then(entries => {
                 if (!entries || !entries.length) {
                     return this.emit(':tell', `Looks like you haven't entered any entries for this week!`);
@@ -234,11 +190,7 @@ const handlers = {
 
                 this.emit(':tellWithCard', speech, card.title, card.content);
             })
-            .catch(err => {
-                console.log('Error: ', JSON.stringify(err));
-
-                this.emit(':tell', `Something went wrong talking to t cube!`);
-            });
+            .catch(handleTCubeError.bind(this));
     },
     'LaunchRequest': function () {
         const authToken = getAuthToken(this);
@@ -275,7 +227,7 @@ const handlers = {
 
 exports.handler = function (event, context) {
     const alexa = Alexa.handler(event, context);
-    alexa.APP_ID = APP_ID;
+    alexa.appId = APP_ID;
     alexa.registerHandlers(handlers);
     alexa.execute();
 };
